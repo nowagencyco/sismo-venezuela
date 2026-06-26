@@ -1,0 +1,14 @@
+AYUDA SISMO VENEZUELA — versión final
+
+Supabase ya está configurado (columnas + bucket de fotos).
+config.js trae: tu Supabase, la fuente del aliado y el webhook de GHL.
+
+Para subir con GitHub:
+  cd ~/Downloads/sismo-venezuela
+  git init
+  git add .
+  git commit -m "sitio sismo venezuela"
+  git remote add origin URL-DE-TU-REPO
+  git branch -M main
+  git push -u origin main
+Luego en Netlify: Import from GitHub > elige el repo > Publish directory: public
