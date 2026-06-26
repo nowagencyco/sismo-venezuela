@@ -591,20 +591,56 @@ async function loadReports(){
   combineReports();
 }
 
+let extTotalReal=0; // conteo real total de la base externa
+let extCounts={total:0,persons:0,found:0,dmg:0,refuge:0}; // conteos reales por categoría
+// Pide a la base de cada fuente los conteos exactos por categoría (consultas instantáneas, no descargan registros)
+async function loadExternalCounts(){
+  let total=0,persons=0,found=0,dmg=0,refuge=0;
+  for(const ec of extClients){
+    const tb=ec.cfg.table;
+    const cnt=async(col,vals)=>{
+      try{
+        const {count}=await ec.client.from(tb).select('*',{count:'exact',head:true}).in(col,vals);
+        return count||0;
+      }catch(e){return 0}
+    };
+    try{
+      const {count:tc}=await ec.client.from(tb).select('*',{count:'exact',head:true});
+      total+=tc||0;
+    }catch(e){}
+    // personas: tipo desaparecido/encontrada/localizada (valores reales de la base del aliado)
+    persons+=await cnt('tipo',['desaparecido','desaparecida','encontrado','encontrada','localizado','localizada']);
+    // localizadas: por estado o por tipo encontrado
+    found+=await cnt('estado',['encontrado','encontrada','ubicada','localizado','localizada','a salvo','asalvo']);
+    // daños y colapsos
+    dmg+=await cnt('tipo',['colapso','danos','daños','colapsada','dano']);
+    // refugios y ayuda
+    refuge+=await cnt('tipo',['refugio','medica','médica','servicios','ayuda']);
+  }
+  extCounts={total:total,persons:persons,found:found,dmg:dmg,refuge:refuge};
+  extTotalReal=total;
+  combineReports();
+}
 async function loadExternal(){
   if(!extClients.length)return;
   let all=[];let diag=[];
   for(const ec of extClients){
     let got=0,errMsg='';
     try{
-      const PAGE=1000;let from=0,keep=true;
-      while(keep && from<20000){
-        const {data,error}=await ec.client.from(ec.cfg.table).select('*').order('created_at',{ascending:false}).range(from,from+PAGE-1);
-        if(error){errMsg=error.message||'error';console.warn('Fuente '+ec.cfg.name+':',error);break}
-        if(!data||!data.length)break;
-        all=all.concat(data.map(r=>normExt(r,ec.cfg.name)));
-        got+=data.length;
-        if(data.length<PAGE)keep=false; else from+=PAGE;
+      // PRIMER LOTE: lo más reciente, se muestra de inmediato
+      const FIRST=300;
+      const {data:firstData,error:firstErr}=await ec.client.from(ec.cfg.table)
+        .select('*').order('created_at',{ascending:false}).range(0,FIRST-1);
+      if(firstErr){errMsg=firstErr.message||'error';console.warn('Fuente '+ec.cfg.name+':',firstErr)}
+      else if(firstData&&firstData.length){
+        all=all.concat(firstData.map(r=>normExt(r,ec.cfg.name)));
+        got+=firstData.length;
+        extReports=all.slice();
+        combineReports(); // ← MOSTRAR YA, sin esperar el resto
+        // RESTO en segundo plano (no bloquea la pantalla)
+        if(firstData.length===FIRST){
+          loadExternalRest(ec,FIRST,all);
+        }
       }
     }catch(e){errMsg=e.message;console.warn('Error leyendo fuente externa',ec.cfg.name,e)}
     diag.push(ec.cfg.name+': '+got+(errMsg?(' ('+errMsg+')'):' registros'));
@@ -613,6 +649,21 @@ async function loadExternal(){
   window.__extDiag=diag.join(' | ');
   console.log('[Fuentes externas]',window.__extDiag);
   combineReports();
+}
+// Carga el resto de registros por páginas, en segundo plano, actualizando a medida que llegan
+async function loadExternalRest(ec,start,all){
+  const PAGE=1000;let from=start,keep=true;
+  while(keep && from<30000){
+    try{
+      const {data,error}=await ec.client.from(ec.cfg.table)
+        .select('*').order('created_at',{ascending:false}).range(from,from+PAGE-1);
+      if(error||!data||!data.length)break;
+      all=all.concat(data.map(r=>normExt(r,ec.cfg.name)));
+      extReports=all.slice();
+      combineReports(); // ← actualiza la pantalla con cada lote que llega
+      if(data.length<PAGE)keep=false; else from+=PAGE;
+    }catch(e){break}
+  }
 }
 
 function subscribeRealtime(){
@@ -624,7 +675,7 @@ function subscribeRealtime(){
     try{ec.client.channel('ext-'+i).on('postgres_changes',{event:'*',schema:'public',table:ec.cfg.table},()=>loadExternal()).subscribe()}catch(e){}
   });
   // refresco periódico de externas por si el realtime no está habilitado en la otra base
-  setInterval(loadExternal, 30000);
+  setInterval(function(){loadExternalCounts();loadExternal()}, 30000);
 }
 
 function go(v){
@@ -672,13 +723,22 @@ function buildLegend(){let h='<h4>¿Qué significa cada color?</h4>';for(const k
 function renderAll(){
   drawMarkers();buildChips();renderList();renderPeople();
   const n=reports.length;
-  // 5 estadísticas en tiempo real (se recalculan cada vez que llegan datos)
+  // 5 estadísticas. Si hay conteos reales de la base externa, se usan (exactos y en vivo).
+  // Si no, se calculan con lo que se ha cargado.
   const persons=reports.filter(r=>TYPES[r.type]&&TYPES[r.type].person);
-  const stPeople=persons.length;                                              // todas las personas registradas
-  const stFound=persons.filter(r=>r.type==='encontrada'||['ubicada','asalvo'].includes(r.status)).length; // localizadas
-  const stSearching=stPeople-stFound;                                         // por localizar = registradas - localizadas
-  const stDmg=reports.filter(r=>['colapso','danos'].includes(r.type)).length; // daños y colapsos
-  const stRefuge=reports.filter(r=>['refugio','medica','servicios'].includes(r.type)).length; // refugios y ayuda
+  let stPeople=persons.length;
+  let stFound=persons.filter(r=>r.type==='encontrada'||['ubicada','asalvo'].includes(r.status)).length;
+  let stSearching=stPeople-stFound;
+  let stDmg=reports.filter(r=>['colapso','danos'].includes(r.type)).length;
+  let stRefuge=reports.filter(r=>['refugio','medica','servicios'].includes(r.type)).length;
+  // Sobrescribir con conteos reales de la base (si ya los tenemos)
+  if(extCounts.total>0){
+    stPeople=extCounts.persons + persons.filter(r=>!r._external).length;
+    stFound=extCounts.found + persons.filter(r=>!r._external&&(r.type==='encontrada'||['ubicada','asalvo'].includes(r.status))).length;
+    stSearching=stPeople-stFound;
+    stDmg=extCounts.dmg + reports.filter(r=>!r._external&&['colapso','danos'].includes(r.type)).length;
+    stRefuge=extCounts.refuge + reports.filter(r=>!r._external&&['refugio','medica','servicios'].includes(r.type)).length;
+  }
   setNum('stPeople',stPeople);setNum('stSearching',stSearching<0?0:stSearching);
   setNum('stFound',stFound);setNum('stDmg',stDmg);setNum('stRefuge',stRefuge);
   const el=document.getElementById('mapLive');if(el)el.textContent='En vivo · '+n+' reporte'+(n===1?'':'s');
@@ -930,7 +990,7 @@ window.flyTo=flyTo;window.acceptGate=acceptGate;
   closeSheet();
   buildTypeGrid();buildTelHome();
   try{if(localStorage.getItem('sismo_consent')==='1')document.getElementById('gate').style.display='none'}catch(e){}
-  if(initSupabase()){loadReports();loadExternal();subscribeRealtime()}
+  if(initSupabase()){loadReports();loadExternalCounts();loadExternal();subscribeRealtime()}
   else{document.getElementById('listBody').innerHTML='<div class="empty">Conecta Supabase en config.js.</div>'}
 })();
 </script>
