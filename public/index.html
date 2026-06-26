@@ -12,6 +12,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Spline+Sans+Mono:wght@500;600&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 <style>
 :root{
   --bg:#0e1116; --panel:#161b22; --panel-2:#1c232d; --panel-3:#222b36; --line:#2a323d;
@@ -59,11 +61,11 @@ h1.title .ve{background:linear-gradient(90deg,#5db4ff,#b78cff);-webkit-backgroun
 .subtitle.lead b{color:var(--amber)}
 .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:30px}
 @media(min-width:560px){.stats{grid-template-columns:repeat(3,1fr)}}
-@media(min-width:900px){.stats{grid-template-columns:repeat(5,1fr);gap:12px}}
+@media(min-width:900px){.stats{grid-template-columns:repeat(6,1fr);gap:10px}}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px 14px;text-align:center;transition:transform .22s ease,border-color .22s ease}
 .stat:hover{transform:translateY(-3px);border-color:var(--ink-faint)}
 .stat .n{font-size:clamp(26px,5vw,40px);font-weight:900;letter-spacing:-.02em;line-height:1}
-.stat .n.pink{color:var(--pink)}.stat .n.green{color:var(--green)}.stat .n.orange{color:var(--orange)}.stat .n.blue{color:var(--blue)}.stat .n.violet{color:var(--violet)}
+.stat .n.pink{color:var(--pink)}.stat .n.green{color:var(--green)}.stat .n.orange{color:var(--orange)}.stat .n.blue{color:var(--blue)}.stat .n.violet{color:var(--violet)}.stat .n.gray{color:#9aa7b4}
 .stat .l{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint);margin-top:8px}
 .cards{display:grid;grid-template-columns:1fr;gap:13px;margin-top:26px}
 @keyframes cardIn{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
@@ -318,6 +320,7 @@ select:focus,textarea:focus,input:focus{outline:2px solid var(--amber)}
       <div class="stat"><div class="n violet" id="stPeople">0</div><div class="l">Personas reportadas</div></div>
       <div class="stat"><div class="n pink" id="stSearching">0</div><div class="l">Por localizar</div></div>
       <div class="stat"><div class="n green" id="stFound">0</div><div class="l">Localizadas ✓</div></div>
+      <div class="stat"><div class="n gray" id="stDeceased">0</div><div class="l">Presuntos fallecidos</div></div>
       <div class="stat"><div class="n orange" id="stDmg">0</div><div class="l">Daños y colapsos</div></div>
       <div class="stat"><div class="n blue" id="stRefuge">0</div><div class="l">Refugios y ayuda</div></div>
     </div>
@@ -478,6 +481,7 @@ select:focus,textarea:focus,input:focus{outline:2px solid var(--amber)}
 <div class="toast" id="toast"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="config.js"></script>
 <script>
@@ -501,7 +505,7 @@ const TEL={
 function fmtTel(n){if(n.length<=4)return n;if(n.startsWith('0'))return n.replace(/(\d{4})(\d{3})(\d{2})(\d{2})/,'$1-$2.$3.$4');return n}
 const STATUS={buscando:{l:'Buscando',c:'st-buscando'},info:{l:'Hay info',c:'st-info'},ubicada:{l:'Ubicada',c:'st-ubicada'},asalvo:{l:'A salvo',c:'st-asalvo'},fallecio:{l:'Falleció',c:'st-fallecio'}};
 
-let map,sb,markers={},reports=[],selType='desaparecida',picked=null,pickMarker=null,activeFilter='all',mapInit=false;
+let map,sb,markers={},reports=[],selType='desaparecida',picked=null,pickMarker=null,activeFilter='all',mapInit=false,clusterLayer=null;
 let peopleFilter='all',photoFile=null,pendingPick=false;
 let extClients=[];           // clientes Supabase de fuentes externas
 let myReports=[],extReports=[]; // se combinan en 'reports'
@@ -592,10 +596,10 @@ async function loadReports(){
 }
 
 let extTotalReal=0; // conteo real total de la base externa
-let extCounts={total:0,persons:0,found:0,dmg:0,refuge:0}; // conteos reales por categoría
+let extCounts={total:0,persons:0,found:0,dmg:0,refuge:0,deceased:0}; // conteos reales por categoría
 // Pide a la base de cada fuente los conteos exactos por categoría (consultas instantáneas, no descargan registros)
 async function loadExternalCounts(){
-  let total=0,persons=0,found=0,dmg=0,refuge=0;
+  let total=0,persons=0,found=0,dmg=0,refuge=0,deceased=0;
   for(const ec of extClients){
     const tb=ec.cfg.table;
     const cnt=async(col,vals)=>{
@@ -608,16 +612,13 @@ async function loadExternalCounts(){
       const {count:tc}=await ec.client.from(tb).select('*',{count:'exact',head:true});
       total+=tc||0;
     }catch(e){}
-    // personas: tipo desaparecido/encontrada/localizada (valores reales de la base del aliado)
     persons+=await cnt('tipo',['desaparecido','desaparecida','encontrado','encontrada','localizado','localizada']);
-    // localizadas: por estado o por tipo encontrado
     found+=await cnt('estado',['encontrado','encontrada','ubicada','localizado','localizada','a salvo','asalvo']);
-    // daños y colapsos
     dmg+=await cnt('tipo',['colapso','danos','daños','colapsada','dano']);
-    // refugios y ayuda
     refuge+=await cnt('tipo',['refugio','medica','médica','servicios','ayuda']);
+    deceased+=await cnt('estado',['fallecido','fallecida','fallecio','muerto','muerta','presunto fallecido']);
   }
-  extCounts={total:total,persons:persons,found:found,dmg:dmg,refuge:refuge};
+  extCounts={total:total,persons:persons,found:found,dmg:dmg,refuge:refuge,deceased:deceased};
   extTotalReal=total;
   combineReports();
 }
@@ -690,24 +691,30 @@ function reportFromHome(){go('map');setTimeout(()=>openSheet('report'),380)}
 function initMap(){
   mapInit=true;
   map=L.map('map',{zoomControl:true,attributionControl:false}).setView([10.30,-66.50],8);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19}).addTo(map);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{maxZoom:19}).addTo(map);
+  clusterLayer=L.markerClusterGroup({chunkedLoading:true,maxClusterRadius:55,spiderfyOnMaxZoom:true,showCoverageOnHover:false});
+  map.addLayer(clusterLayer);
   map.on('click',e=>{if(document.getElementById('sheet-report').classList.contains('open')||pendingPick)setPicked(e.latlng.lat,e.latlng.lng)});
   buildChips();buildLegend();drawMarkers();
 }
 function makeIcon(type){const t=TYPES[type]||TYPES.otro;return L.divIcon({className:'',html:'<div class="pin" style="background:'+t.color+'"><span>'+t.emoji+'</span></div>',iconSize:[30,30],iconAnchor:[15,28],popupAnchor:[0,-26]})}
 function drawMarkers(){
-  if(!mapInit)return;
-  Object.values(markers).forEach(m=>map.removeLayer(m));markers={};
-  reports.filter(passFilter).forEach(r=>{
+  if(!mapInit||!clusterLayer)return;
+  clusterLayer.clearLayers();markers={};
+  const list=reports.filter(passFilter);
+  const batch=[];
+  list.forEach(r=>{
     if(r.lat==null||r.lng==null)return;
     const t=TYPES[r.type]||TYPES.otro;
     const ct=r.contact?'<br><a href="tel:'+r.contact.replace(/[^\d+]/g,'')+'" style="color:#ffb02e">📞 '+esc(r.contact)+'</a>':'';
     const ph=r.photo_url?'<br><img src="'+esc(r.photo_url)+'" alt="">':'';
     const nm=r.person_name?'<br><b>'+esc(r.person_name)+'</b>'+(r.person_age?' · '+esc(r.person_age)+' años':''):'';
-    const m=L.marker([r.lat,r.lng],{icon:makeIcon(r.type)}).addTo(map);
+    const m=L.marker([r.lat,r.lng],{icon:makeIcon(r.type)});
     m.bindPopup('<b>'+t.emoji+' '+t.label+'</b>'+nm+'<br>'+esc(r.description)+ct+ph+'<br><small style="color:#9aa7b4">'+timeAgo(r.created_at)+'</small>');
+    batch.push(m);
     markers[r.id]=m;
   });
+  clusterLayer.addLayers(batch); // agrega en bloque, agrupando automáticamente — rápido aunque sean miles
 }
 function flyTo(lat,lng){go('map');setTimeout(()=>{if(map)map.flyTo([lat,lng],14,{duration:.8})},250)}
 function passFilter(r){return activeFilter==='all'||r.type===activeFilter}
@@ -731,6 +738,7 @@ function renderAll(){
   let stSearching=stPeople-stFound;
   let stDmg=reports.filter(r=>['colapso','danos'].includes(r.type)).length;
   let stRefuge=reports.filter(r=>['refugio','medica','servicios'].includes(r.type)).length;
+  let stDeceased=reports.filter(r=>['fallecido','fallecida','fallecio'].includes(r.status)).length;
   // Sobrescribir con conteos reales de la base (si ya los tenemos)
   if(extCounts.total>0){
     stPeople=extCounts.persons + persons.filter(r=>!r._external).length;
@@ -738,9 +746,11 @@ function renderAll(){
     stSearching=stPeople-stFound;
     stDmg=extCounts.dmg + reports.filter(r=>!r._external&&['colapso','danos'].includes(r.type)).length;
     stRefuge=extCounts.refuge + reports.filter(r=>!r._external&&['refugio','medica','servicios'].includes(r.type)).length;
+    stDeceased=extCounts.deceased + reports.filter(r=>!r._external&&['fallecido','fallecida','fallecio'].includes(r.status)).length;
   }
   setNum('stPeople',stPeople);setNum('stSearching',stSearching<0?0:stSearching);
   setNum('stFound',stFound);setNum('stDmg',stDmg);setNum('stRefuge',stRefuge);
+  setNum('stDeceased',stDeceased);
   const el=document.getElementById('mapLive');if(el)el.textContent='En vivo · '+n+' reporte'+(n===1?'':'s');
 }
 function setNum(id,v){const el=document.getElementById(id);if(el)el.textContent=v.toLocaleString('es-VE')}
@@ -939,6 +949,14 @@ function closeSheet(){
 }
 // Cierre por tecla Escape
 document.addEventListener('keydown',function(e){if(e.key==='Escape'||e.keyCode===27)closeSheet()});
+// Al volver a la pestaña: redibujar mapa y recargar datos (evita que quede en negro/lento)
+document.addEventListener('visibilitychange',function(){
+  if(!document.hidden){
+    try{if(map&&mapInit){map.invalidateSize();drawMarkers()}}catch(e){}
+    try{loadExternalCounts();loadExternal();if(sb)loadReports()}catch(e){}
+  }
+});
+window.addEventListener('focus',function(){try{if(map&&mapInit)map.invalidateSize()}catch(e){}});
 // Respaldo: delegación de eventos para cerrar (funciona aunque los onclick inline fallen)
 document.addEventListener('click',function(e){
   var t=e.target;
