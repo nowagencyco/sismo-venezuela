@@ -23,3 +23,12 @@ window.EXTERNAL_SOURCES = [
 // IMPORTANTE: el workflow de GHL solo debe "Create/Update Contact",
 // sin acciones de SMS/llamada/email, para que no genere costos.
 window.GHL_WEBHOOK_URL = "https://services.leadconnectorhq.com/hooks/zvg7dYiCLDm2RaYLUQva/webhook-trigger/bc8876c8-7c27-443d-97e5-5cf6ce8671f2";
+
+// --- Cifra de PRESUNTOS FALLECIDOS (manual) ---
+// Actualiza este número cuando EFE u otra fuente oficial lo informe.
+// Pon null si prefieres que NO se muestre la tarjeta.
+window.FALLECIDOS = {
+  total: 1450,                 // ← cambia este número
+  fuente: "EFE",               // ← fuente del dato
+  actualizado: "27 jun 2026"   // ← fecha de actualización
+};
